@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-type AppState = 'WAITING_FOR_WAKE_WORD' | 'WAKE_WORD_DETECTED' | 'LISTENING_FOR_COMMAND' | 'COMMAND_CAPTURED' | 'PROCESSING';
+type AppState = 'WAITING_FOR_WAKE_WORD' | 'WAKE_WORD_DETECTED' | 'LISTENING_FOR_COMMAND' | 'COMMAND_CAPTURED' | 'PROCESSING' | 'META_CONVERSATION' | 'DETECTING_SPEECH_END';
 
 export default function Home() {
   const [state, setState] = useState<AppState>('WAITING_FOR_WAKE_WORD');
@@ -25,6 +25,9 @@ export default function Home() {
   const stateRef = useRef<AppState>('WAITING_FOR_WAKE_WORD');
   const commandRef = useRef('');
   const transcriptRef = useRef('');
+  const audioEnergyHistoryRef = useRef<number[]>([]);
+  const silenceCountRef = useRef(0);
+  const consecutiveSilenceFramesRef = useRef(0);
 
   // Sync state ref with state
   useEffect(() => {
@@ -41,7 +44,7 @@ export default function Home() {
     transcriptRef.current = transcript;
   }, [transcript]);
 
-  // Frequency analysis for noise filtering
+  // Enhanced frequency analysis for noise filtering and speech detection
   const analyzeFrequency = (data: Uint8Array): boolean => {
     // Calculate dominant frequency and check if it's in human speech range
     const sum = data.reduce((a, b) => a + b, 0);
@@ -66,6 +69,38 @@ export default function Home() {
     return hasEnergy && isSpeechPattern;
   };
 
+  // Advanced voice activity detection with history tracking
+  const detectSpeechEnd = (data: Uint8Array): boolean => {
+    const sum = data.reduce((a, b) => a + b, 0);
+    const average = sum / data.length;
+    
+    // Track audio energy history
+    audioEnergyHistoryRef.current.push(average);
+    if (audioEnergyHistoryRef.current.length > 20) {
+      audioEnergyHistoryRef.current.shift();
+    }
+    
+    // Calculate dynamic threshold based on recent audio levels
+    const recentAverage = audioEnergyHistoryRef.current.reduce((a, b) => a + b, 0) / audioEnergyHistoryRef.current.length;
+    const dynamicThreshold = Math.max(10, recentAverage * 0.3); // 30% of recent average, minimum 10
+    
+    // Check if current frame is silence
+    const isSilence = average < dynamicThreshold;
+    
+    if (isSilence) {
+      consecutiveSilenceFramesRef.current++;
+      silenceCountRef.current++;
+    } else {
+      consecutiveSilenceFramesRef.current = 0;
+    }
+    
+    // Speech end detection: significant consecutive silence after speech activity
+    const hasSignificantSpeech = silenceCountRef.current > 5; // At least 5 speech frames
+    const hasExtendedSilence = consecutiveSilenceFramesRef.current > 15; // 15 consecutive silent frames
+    
+    return hasSignificantSpeech && hasExtendedSilence;
+  };
+
   const startAudioAnalysis = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -82,12 +117,32 @@ export default function Home() {
       setAnalyser(analyserNode);
       setFrequencyData(dataArray);
       
-      // Continuous frequency analysis
+      // Continuous frequency analysis with advanced speech end detection
       const analyze = () => {
         if (analyserNode) {
           analyserNode.getByteFrequencyData(dataArray);
           const isSpeech = analyzeFrequency(dataArray);
           setIsHumanSpeech(isSpeech);
+          
+          // Check for speech end in command listening mode
+          if (stateRef.current === 'LISTENING_FOR_COMMAND' && speechDetectedRef.current) {
+            const speechEnded = detectSpeechEnd(dataArray);
+            if (speechEnded) {
+              console.log('Advanced speech end detection triggered');
+              setState('DETECTING_SPEECH_END');
+              const commandToProcess = commandRef.current || transcriptRef.current;
+              if (commandToProcess.trim()) {
+                if (silenceTimerRef.current) {
+                  clearTimeout(silenceTimerRef.current);
+                }
+                // Small delay to ensure final STT results are captured
+                setTimeout(() => {
+                  processCommand();
+                }, 300);
+              }
+            }
+          }
+          
           requestAnimationFrame(analyze);
         }
       };
@@ -96,6 +151,45 @@ export default function Home() {
     } catch (error) {
       console.error('Audio analysis failed:', error);
     }
+  };
+
+  // Detect meta-conversation phrases (about the process/exercise, not actual commands)
+  const isMetaConversation = (text: string): boolean => {
+    const lowerText = text.toLowerCase().trim();
+    
+    // Phrases that indicate the user is talking about the process, not giving a command
+    const metaPhrases = [
+      /\bthis is a routine exercise\b/i,
+      /\bthis is the interritory exercise\b/i,
+      /\bthis is the territory exercise\b/i,
+      /\bdavid david\b/i,
+      /\bdavid-david\b/i,
+      /\bthis is the process\b/i,
+      /\bthis is just a process\b/i,
+      /\bthis is an exercise\b/i,
+      /\bthis is just an exercise\b/i,
+      /\bthis is a test\b/i,
+      /\bthis is just a test\b/i,
+      /\bthis is training\b/i,
+      /\bthis is practice\b/i,
+      /\bthis is demonstration\b/i,
+      /\bthis is demo\b/i,
+      /\bthis is example\b/i,
+      /\bwe are testing\b/i,
+      /\bi am testing\b/i,
+      /\bjust testing\b/i,
+      /\bjust practicing\b/i,
+      /\bjust demonstrating\b/i,
+    ];
+    
+    for (const pattern of metaPhrases) {
+      if (pattern.test(lowerText)) {
+        console.log('Meta-conversation detected, skipping processing:', lowerText);
+        return true;
+      }
+    }
+    
+    return false;
   };
 
   // Enhanced sentence ending detection
@@ -144,6 +238,10 @@ export default function Home() {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
     }
+    
+    // Reset speech detection counters when new speech is detected
+    consecutiveSilenceFramesRef.current = 0;
+    silenceCountRef.current = 0;
     
     // Auto-process command after silence if speech was detected
     if (stateRef.current === 'LISTENING_FOR_COMMAND' && speechDetectedRef.current) {
@@ -218,19 +316,36 @@ export default function Home() {
   const extractCommand = (text: string): string => {
     const lowerText = text.toLowerCase();
     
-    // Remove wake word and extract command
-    const wakeWordVariations = ['hey siri', 'hey si ri'];
+    // Comprehensive wake word removal - all variations
+    const wakeWordVariations = [
+      'hey siri',
+      'hey si ri', 
+      'hey siri,',
+      'hey si ri,',
+      'hey siri.',
+      'hey si ri.',
+      'hey siri!',
+      'hey si ri!',
+      'siri',
+      'si ri'
+    ];
     
+    let command = text;
+    
+    // Remove all wake word variations
     for (const wakeWord of wakeWordVariations) {
-      const regex = new RegExp(wakeWord, 'i');
-      if (regex.test(lowerText)) {
-        const command = text.replace(regex, '').trim();
-        // Remove leading punctuation and whitespace
-        return command.replace(/^[,\.\!\?\s]+/, '').trim();
-      }
+      const regex = new RegExp(wakeWord, 'gi');
+      command = command.replace(regex, '').trim();
     }
     
-    return text;
+    // Remove leading punctuation, commas, and extra whitespace
+    command = command.replace(/^[,\.\!\?\s]+/, '').trim();
+    
+    // Remove any remaining extra whitespace
+    command = command.replace(/\s+/g, ' ').trim();
+    
+    console.log('Extracted command from:', text, '->', command);
+    return command;
   };
 
   const startListening = () => {
@@ -427,6 +542,11 @@ export default function Home() {
     activationGuardRef.current = false;
     speechDetectedRef.current = false;
     
+    // Reset audio analysis counters
+    audioEnergyHistoryRef.current = [];
+    silenceCountRef.current = 0;
+    consecutiveSilenceFramesRef.current = 0;
+    
     // Don't clear previous response - keep it visible
     // setLlmResponse('');
     
@@ -440,11 +560,31 @@ export default function Home() {
   };
 
   const processCommand = async () => {
-    const commandToProcess = commandRef.current || transcriptRef.current;
+    const rawCommand = commandRef.current || transcriptRef.current;
+    
+    // Always extract command to ensure wake words are removed
+    const commandToProcess = extractCommand(rawCommand);
+    
+    console.log('Raw input:', rawCommand);
+    console.log('Extracted command for processing:', commandToProcess);
     
     if (!commandToProcess.trim()) {
-      alert('No command detected. Please try again.');
-      resetToWakeWordListening();
+      console.log('No command after wake word removal, ignoring');
+      // If the user only said the wake word, just reset without alerting
+      setTimeout(() => {
+        resetToWakeWordListening();
+      }, 1000);
+      return;
+    }
+
+    // Check if this is meta-conversation (about the process, not a real command)
+    if (isMetaConversation(commandToProcess)) {
+      console.log('Meta-conversation detected, ignoring as command:', commandToProcess);
+      setState('META_CONVERSATION');
+      // Just reset without processing - the user is talking about the process
+      setTimeout(() => {
+        resetToWakeWordListening();
+      }, 2000);
       return;
     }
 
@@ -519,6 +659,10 @@ export default function Home() {
         return '✅';
       case 'PROCESSING':
         return '⚙️';
+      case 'META_CONVERSATION':
+        return '💬';
+      case 'DETECTING_SPEECH_END':
+        return '🔇';
       default:
         return '🎤';
     }
@@ -536,6 +680,10 @@ export default function Home() {
         return 'Command captured';
       case 'PROCESSING':
         return 'Processing...';
+      case 'META_CONVERSATION':
+        return 'Meta-conversation detected';
+      case 'DETECTING_SPEECH_END':
+        return 'Detecting speech end...';
       default:
         return 'Listening';
     }
@@ -598,8 +746,8 @@ export default function Home() {
                 </span>
               </div>
               <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                <div className="text-sm text-blue-600 mb-1">Command:</div>
-                <div className="text-lg font-semibold text-blue-800">"{command || transcript}"</div>
+                <div className="text-sm text-blue-600 mb-1">Command (wake word removed):</div>
+                <div className="text-lg font-semibold text-blue-800">"{command || extractCommand(transcript)}"</div>
                 <div className="mt-2 text-sm text-blue-600">
                   Auto-processing when sentence complete or after silence...
                 </div>
@@ -609,6 +757,30 @@ export default function Home() {
                 >
                   Process Now
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Meta Conversation State */}
+          {state === 'META_CONVERSATION' && (
+            <div className="mt-4 p-4 bg-yellow-50 rounded-lg border-2 border-yellow-200">
+              <div className="text-yellow-800 font-semibold mb-2">💬 Meta-conversation Detected</div>
+              <div className="text-sm text-yellow-700 mb-1">Heard:</div>
+              <div className="text-base text-yellow-800">"{command || transcript}"</div>
+              <div className="mt-2 text-sm text-yellow-600">
+                This appears to be about the process itself, not a command. Waiting for a real command...
+              </div>
+            </div>
+          )}
+
+          {/* Detecting Speech End State */}
+          {state === 'DETECTING_SPEECH_END' && (
+            <div className="mt-4 p-4 bg-purple-50 rounded-lg border-2 border-purple-200">
+              <div className="text-purple-800 font-semibold mb-2">🔇 Speech End Detected</div>
+              <div className="text-sm text-purple-700 mb-1">Command:</div>
+              <div className="text-base text-purple-800">"{command || transcript}"</div>
+              <div className="mt-2 text-sm text-purple-600">
+                Processing your command now...
               </div>
             </div>
           )}
@@ -676,9 +848,10 @@ export default function Home() {
             <li>Then say your command (e.g., "What is the weather?")</li>
             <li>Or say both together: "Hey Siri, what is the weather?"</li>
             <li>Similar words like "siri", "si ri" will NOT activate</li>
-            <li>Frequency filtering reduces background noise</li>
+            <li>Advanced speech end detection for faster response</li>
             <li>Smart sentence detection: processes when sentence ends naturally</li>
             <li>Processes faster for questions and complete sentences</li>
+            <li>Dynamic noise filtering adapts to environment</li>
           </ul>
         </div>
       </div>
