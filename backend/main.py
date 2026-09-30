@@ -4,6 +4,9 @@ This is a minimal FastAPI backend for Google Gemini LLM integration.
 The core wake word detection happens in the frontend using Web Speech API.
 """
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -47,6 +50,7 @@ MOCK_RESPONSES = {
 class CommandRequest(BaseModel):
     command: str
     language: Optional[str] = "en"
+    wake_word_detected: Optional[bool] = False
 
 
 class CommandResponse(BaseModel):
@@ -78,34 +82,73 @@ def process_command(request: CommandRequest):
     Process a command using Google Gemini LLM.
     
     This integrates with Google's Gemini model for intelligent responses.
+    Handles multiple languages including Indian languages.
     """
     print(f"Received command: {request.command}")
+    print(f"Language: {request.language}")
+    print(f"Wake word detected: {request.wake_word_detected}")
     print(f"Gemini client available: {client is not None}")
+    
+    # Clean up the command - remove wake word if present
+    command = request.command.strip()
+    wake_words = ["hey siri", "hai siri", "he siri", "hay siri", "hey si ri"]
+    
+    for wake_word in wake_words:
+        if command.lower().startswith(wake_word):
+            command = command[len(wake_word):].strip()
+            # Remove leading punctuation and filler words
+            command = command.lstrip(".,!? ")
+            # Remove common filler words
+            filler_words = ["please", "can you", "could you", "i want", "i need", "i would like"]
+            for filler in filler_words:
+                if command.lower().startswith(filler):
+                    command = command[len(filler):].strip()
+            break
+    
+    print(f"Cleaned command: {command}")
     
     if not client:
         print("Using mock responses (no API key)")
         # Fallback to mock responses if API key not configured
-        command_lower = request.command.lower().strip()
+        command_lower = command.lower().strip()
         for key, response in MOCK_RESPONSES.items():
             if key in command_lower:
                 print(f"Mock response matched: {key}")
                 return CommandResponse(
                     response=response,
-                    command=request.command
+                    command=command
                 )
         
         print("Using default mock response")
         return CommandResponse(
-            response=f"I heard you say: {request.command}",
-            command=request.command
+            response=f"I heard you say: {command}",
+            command=command
         )
     
     try:
         print("Calling Gemini API...")
+        
+        # Adjust system prompt based on language
+        language_instruction = ""
+        if request.language and request.language != "en":
+            language_map = {
+                "hi": "Respond in Hindi (देवनागरी लिपि में उत्तर दें)",
+                "ta": "Respond in Tamil (தமிழில் பதிலளிக்கவும்)",
+                "te": "Respond in Telugu (తెలుగులో స్పందించండి)",
+                "kn": "Respond in Kannada (ಕನ್ನಡದಲ್ಲಿ ಪ್ರತಿಕ್ರಿಯಿಸಿ)",
+                "ml": "Respond in Malayalam (മലയാളത്തിൽ മറുപടി നൽകുക)",
+                "gu": "Respond in Gujarati (ગુજરાતીમાં જવાબ આપો)",
+                "mr": "Respond in Marathi (मराठीत उत्तर द्या)",
+                "bn": "Respond in Bengali (বাংলায় উত্তর দিন)",
+            }
+            lang_code = request.language.split('-')[0]  # Extract language code (e.g., 'hi' from 'hi-IN')
+            language_instruction = language_map.get(lang_code, "")
+        
         # Use Gemini for intelligent response with new API
+        system_prompt = f"You are Siri, a helpful voice assistant. Keep responses concise and friendly. {language_instruction}"
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite",
-            contents=[f"You are Siri, a helpful voice assistant. Keep responses concise and friendly. User says: {request.command}"]
+            contents=[f"{system_prompt} User says: {command}"]
         )
         
         ai_response = response.text
@@ -113,7 +156,7 @@ def process_command(request: CommandRequest):
         
         return CommandResponse(
             response=ai_response,
-            command=request.command
+            command=command
         )
         
     except Exception as e:

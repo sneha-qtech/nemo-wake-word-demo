@@ -98,24 +98,73 @@ export default function Home() {
     }
   };
 
+  // Enhanced sentence ending detection
+  const detectSentenceEnd = (text: string): boolean => {
+    const trimmedText = text.trim();
+    
+    // Check for sentence-ending punctuation
+    const punctuationEnders = /[.!?。？！]+$/;
+    if (punctuationEnders.test(trimmedText)) {
+      console.log('Sentence ending detected via punctuation:', trimmedText);
+      return true;
+    }
+    
+    // Check for common sentence-ending phrases
+    const sentenceEnders = [
+      /\b(?:please|thanks|thank you|bye|goodbye|see you|take care)\s*$/i,
+      /\b(?:right|okay|alright|got it|understood)\s*$/i,
+      /\b(?:that's it|that is all|nothing else)\s*$/i,
+      /\b(?:done|finished|complete)\s*$/i,
+    ];
+    
+    for (const pattern of sentenceEnders) {
+      if (pattern.test(trimmedText)) {
+        console.log('Sentence ending detected via phrase:', trimmedText);
+        return true;
+      }
+    }
+    
+    // Check for question patterns (which typically indicate complete thoughts)
+    const questionPatterns = [
+      /^(?:what|how|why|when|where|who|which|can|could|would|should|will|do|does|did|is|are|was|were)\b/i,
+      /\?\s*$/ // Explicit question mark
+    ];
+    
+    for (const pattern of questionPatterns) {
+      if (pattern.test(trimmedText)) {
+        console.log('Question pattern detected:', trimmedText);
+        return true;
+      }
+    }
+    
+    return false;
+  };
+
   const resetSilenceTimer = () => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
     }
     
-    // Auto-process command after 2 seconds of silence if speech was detected
+    // Auto-process command after silence if speech was detected
     if (stateRef.current === 'LISTENING_FOR_COMMAND' && speechDetectedRef.current) {
-      console.log('Setting 2-second silence timer. Command ref:', commandRef.current, 'Transcript ref:', transcriptRef.current);
+      const currentText = commandRef.current || transcriptRef.current;
+      
+      // Adaptive timeout based on sentence ending detection
+      const hasSentenceEnd = detectSentenceEnd(currentText);
+      const timeoutDuration = hasSentenceEnd ? 800 : 2000; // Faster (0.8s) if sentence end detected
+      
+      console.log(`Setting ${timeoutDuration}ms silence timer. Sentence end detected: ${hasSentenceEnd}. Command:`, currentText);
+      
       silenceTimerRef.current = setTimeout(() => {
         const commandToProcess = commandRef.current || transcriptRef.current;
-        console.log('Silence timeout triggered. Command ref:', commandRef.current, 'Transcript ref:', transcriptRef.current, 'Using:', commandToProcess);
+        console.log('Silence timeout triggered. Command:', commandToProcess);
         if (commandToProcess.trim()) {
           console.log('Silence timeout - auto-processing command:', commandToProcess);
           processCommand();
         } else {
           console.log('Silence timeout but no command/transcript, skipping');
         }
-      }, 2000); // 2 seconds of silence (faster response)
+      }, timeoutDuration);
     }
   };
 
@@ -265,15 +314,24 @@ export default function Home() {
         speechDetectedRef.current = true;
         resetSilenceTimer();
         
-        // If we have a final result with a command, process immediately
+        // If we have a final result with a command, check for sentence endings
         if (final && extractedCommand.trim()) {
-          console.log('Final command detected - processing immediately:', extractedCommand);
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
+          console.log('Final command detected:', extractedCommand);
+          
+          // Check if sentence appears complete via linguistic cues
+          const hasSentenceEnd = detectSentenceEnd(extractedCommand);
+          
+          if (hasSentenceEnd) {
+            console.log('Sentence ending detected - processing immediately:', extractedCommand);
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+            }
+            setTimeout(() => {
+              processCommand();
+            }, 300); // Very short delay for sentence endings
+          } else {
+            console.log('No clear sentence ending - waiting for silence timeout');
           }
-          setTimeout(() => {
-            processCommand();
-          }, 500); // Small delay to ensure command is set
         }
       }
     };
@@ -543,7 +601,7 @@ export default function Home() {
                 <div className="text-sm text-blue-600 mb-1">Command:</div>
                 <div className="text-lg font-semibold text-blue-800">"{command || transcript}"</div>
                 <div className="mt-2 text-sm text-blue-600">
-                  Auto-processing in 2 seconds if silent...
+                  Auto-processing when sentence complete or after silence...
                 </div>
                 <button
                   onClick={() => processCommand()}
@@ -619,7 +677,8 @@ export default function Home() {
             <li>Or say both together: "Hey Siri, what is the weather?"</li>
             <li>Similar words like "siri", "si ri" will NOT activate</li>
             <li>Frequency filtering reduces background noise</li>
-            <li>Auto-processes command after 2 seconds of silence</li>
+            <li>Smart sentence detection: processes when sentence ends naturally</li>
+            <li>Processes faster for questions and complete sentences</li>
           </ul>
         </div>
       </div>
